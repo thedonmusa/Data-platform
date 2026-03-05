@@ -1,3 +1,39 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg: #060a10;
+  --sf: rgba(255, 255, 255, 0.025);
+  --bd: rgba(255, 255, 255, 0.06);
+  --tx: #d1d5db;
+  --dim: #6b7280;
+  --br: #f3f4f6;
+}
+
+body {
+  background: var(--bg);
+  color: var(--tx);
+  font-family: 'Outfit', sans-serif;
+}
+
+.fi { animation: fi 0.5s ease both; }
+@keyframes fi {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes pl {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+.sc { transition: all 0.3s; cursor: pointer; }
+.sc:hover { border-color: rgba(255, 255, 255, 0.12) !important; transform: translateY(-2px); }
+
+.cb { white-space: pre-wrap; line-height: 1.6; }
+.cb strong { color: var(--br); font-weight: 600; }
+
+.st::-webkit-scrollbar { width: 4px; }
+.st::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 2px; }
