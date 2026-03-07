@@ -10,10 +10,10 @@ export async function POST(req: NextRequest) {
 
     const { message, systemPrompt, conversationHistory } = await req.json();
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    // Support both ANTHROPIC_API_KEY and ANTHROPIC_KEY env var names
+    const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_KEY;
     if (!apiKey) {
-      // Fallback to local response if no API key
-      return NextResponse.json({ response: `I received your message: "${message}". To enable AI-powered responses, add your ANTHROPIC_API_KEY to Vercel environment variables.`, model: 'fallback' });
+      return NextResponse.json({ response: `I received your message: "${message}". To enable AI-powered responses, add your ANTHROPIC_API_KEY or ANTHROPIC_KEY to Vercel environment variables.`, model: 'fallback' });
     }
 
     const messages = [
