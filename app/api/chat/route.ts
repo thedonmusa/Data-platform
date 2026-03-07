@@ -1,14 +1,80 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
+/**
+ * Multi-provider AI Chat Route
+ * Priority: Google Gemini (free) → Groq (free) → Anthropic (paid)
+ * 
+ * Env vars needed (add whichever you have):
+ *   GEMINI_API_KEY    - Free at aistudio.google.com (recommended)
+ *   GROQ_API_KEY      - Free at console.groq.com
+ *   ANTHROPIC_KEY     - Paid at console.anthropic.com
+ */
 
-// Try models in order of preference
-const MODELS = [
-  'claude-sonnet-4-20250514',
-  'claude-3-5-sonnet-20241022',
-  'claude-3-haiku-20240307',
-];
+interface Provider {
+  name: string;
+  url: string;
+  key: string | undefined;
+  buildRequest: (messages: any[], system: string) => any;
+  buildHeaders: (key: string) => Record<string, string>;
+  extractResponse: (data: any) => string;
+}
+
+function getProviders(): Provider[] {
+  return [
+    // 1. Google Gemini — FREE, no credit card, generous limits
+    {
+      name: 'gemini',
+      url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY || ''}`,
+      key: process.env.GEMINI_API_KEY,
+      buildHeaders: () => ({ 'Content-Type': 'application/json' }),
+      buildRequest: (messages, system) => ({
+        system_instruction: { parts: [{ text: system }] },
+        contents: messages.map(m => ({
+          role: m.role === 'user' ? 'user' : 'model',
+          parts: [{ text: m.content }],
+        })),
+        generationConfig: { maxOutputTokens: 1024, temperature: 0.7 },
+      }),
+      extractResponse: (data) => data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response.',
+    },
+    // 2. Groq — FREE, extremely fast, 14,400 req/day
+    {
+      name: 'groq',
+      url: 'https://api.groq.com/openai/v1/chat/completions',
+      key: process.env.GROQ_API_KEY,
+      buildHeaders: (key) => ({
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${key}`,
+      }),
+      buildRequest: (messages, system) => ({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'system', content: system }, ...messages],
+        max_tokens: 1024,
+        temperature: 0.7,
+      }),
+      extractResponse: (data) => data?.choices?.[0]?.message?.content || 'No response.',
+    },
+    // 3. Anthropic — Paid, highest quality
+    {
+      name: 'anthropic',
+      url: 'https://api.anthropic.com/v1/messages',
+      key: process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_KEY,
+      buildHeaders: (key) => ({
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+      }),
+      buildRequest: (messages, system) => ({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 1024,
+        system,
+        messages,
+      }),
+      extractResponse: (data) => data?.content?.[0]?.text || 'No response.',
+    },
+  ];
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,14 +82,7 @@ export async function POST(req: NextRequest) {
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { message, systemPrompt, conversationHistory } = await req.json();
-
-    const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_KEY;
-    if (!apiKey) {
-      return NextResponse.json({
-        response: `No API key found. Add ANTHROPIC_API_KEY to Vercel env vars.`,
-        model: 'fallback',
-      });
-    }
+    const system = systemPrompt || 'You are a helpful data platform assistant. Be concise.';
 
     const messages = [
       ...(conversationHistory || []).slice(-20).map((m: any) => ({
@@ -33,63 +92,47 @@ export async function POST(req: NextRequest) {
       { role: 'user', content: message },
     ];
 
-    // Try each model until one works
-    for (const model of MODELS) {
+    const providers = getProviders().filter(p => p.key);
+
+    if (providers.length === 0) {
+      return NextResponse.json({
+        response: 'No AI provider configured. Add one of these env vars in Vercel:\n\n' +
+          '  GEMINI_API_KEY  → Free at aistudio.google.com\n' +
+          '  GROQ_API_KEY    → Free at console.groq.com\n' +
+          '  ANTHROPIC_KEY   → Paid at console.anthropic.com',
+        model: 'none',
+      });
+    }
+
+    // Try each provider in priority order
+    const errors: string[] = [];
+    for (const provider of providers) {
       try {
-        const res = await fetch(ANTHROPIC_API, {
+        const url = provider.name === 'gemini' ? provider.url : provider.url;
+        const res = await fetch(provider.url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model,
-            max_tokens: 1024,
-            system: systemPrompt || 'You are a helpful data platform assistant.',
-            messages,
-          }),
+          headers: provider.buildHeaders(provider.key!),
+          body: JSON.stringify(provider.buildRequest(messages, system)),
         });
 
         if (res.ok) {
           const data = await res.json();
-          const text = data.content?.[0]?.text || 'No response generated.';
-          return NextResponse.json({ response: text, model: data.model, usage: data.usage });
+          const text = provider.extractResponse(data);
+          return NextResponse.json({ response: text, model: provider.name });
         }
 
         const errText = await res.text();
-        console.error(`Model ${model} failed (${res.status}):`, errText);
-
-        // If it's an auth error, don't try other models
-        if (res.status === 401 || res.status === 403) {
-          let parsed;
-          try { parsed = JSON.parse(errText); } catch (_) {}
-          const detail = parsed?.error?.message || errText;
-          return NextResponse.json({
-            response: `API key error: ${detail}\n\nCheck your ANTHROPIC_KEY in Vercel env vars. Make sure it starts with "sk-ant-".`,
-            model: 'error',
-          });
-        }
-
-        // If model not found, try next
-        if (res.status === 404 || res.status === 400) continue;
-
-        // Other errors — return detail
-        let parsed;
-        try { parsed = JSON.parse(errText); } catch (_) {}
-        const detail = parsed?.error?.message || errText;
-        return NextResponse.json({
-          response: `Anthropic API error (${res.status}): ${detail}`,
-          model: 'error',
-        });
-      } catch (fetchErr: any) {
-        console.error(`Fetch error for model ${model}:`, fetchErr.message);
-        continue;
+        const shortErr = errText.slice(0, 200);
+        console.error(`[${provider.name}] ${res.status}: ${shortErr}`);
+        errors.push(`${provider.name}: ${res.status}`);
+      } catch (e: any) {
+        console.error(`[${provider.name}] fetch error:`, e.message);
+        errors.push(`${provider.name}: ${e.message}`);
       }
     }
 
     return NextResponse.json({
-      response: 'All models failed. Check your API key and billing at console.anthropic.com.',
+      response: `All AI providers failed:\n${errors.join('\n')}\n\nCheck your API keys in Vercel env vars.`,
       model: 'error',
     });
   } catch (e: any) {
